@@ -1,3 +1,4 @@
+import { cameraAngleFeedback } from './cameraAngleFeedback.js';
 const injectionPhases = new Set(['injection', 'intervention_injection']);
 const activePhases = new Set([
   'preparation', 'injection', 'scenario_pending', 'scenario_active',
@@ -27,6 +28,9 @@ export function getAngleFeedback(state) {
   }
   if (angle.fresh !== true) {
     return waiting('The angle reading has expired or the sensor is disconnected. Reconnect and submit a fresh reading.', 'Angle reading unavailable');
+  }
+  if (state.angle_source === 'camera' && angle.source === 'camera' && angle.method === 'yolo_angle_class_estimate') {
+    return cameraAngleFeedback(angle, minimum, maximum);
   }
   if (angle.calibrated !== true || !nonemptyString(angle.calibration_id)) {
     return waiting('Calibrate the syringe angle against the dummy surface and submit a new reading.', 'Angle calibration required');

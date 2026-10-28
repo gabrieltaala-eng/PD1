@@ -104,8 +104,22 @@ class AssessmentService:
         return hw
 
     def _angle_state(self):
-        source = self.state["input_source"]
-        return self._angles.snapshot(source, self.state["injection_stage_id"], self._hardware_state(source)["mpu_connected"])
+        source = self._angle_source()
+        connected = True if source == "camera" else self._hardware_state(source)["mpu_connected"]
+        return self._angles.snapshot(source, self.state["injection_stage_id"], connected)
+
+    def _angle_source(self):
+        return "camera" if self.state.get("angle_source") == "camera" else self.state["input_source"]
+
+    def camera_angle(self, prediction, session_id, stage_id):
+        """Only called with server-produced predictions; never client angle values."""
+        with self.lock:
+            if self._angle_source() != "camera" or not session_id or session_id != self.state["session_id"] or not stage_id or stage_id != self.state["injection_stage_id"]:
+                raise AssessmentError("Camera frame belongs to an inactive angle source or injection stage.")
+            self._angles.ingest_camera(prediction, stage_id)
+            self._record_current_angle("camera")
+            self._save()
+            return self._angle_state()
 
     def _intervention_policy(self):
         scenario = self.config["scenarios"][self.state["scenario_id"] or self.state["planned_scenario"]]
@@ -128,11 +142,12 @@ class AssessmentService:
         if not stage or data.get("injection_stage_id") != self.state["injection_stage_id"]:
             raise AssessmentError("Complete Injection must target the currently unlocked injection stage.")
         angle = self._angle_state()
-        if not angle or not angle["fresh"] or not angle["calibrated"] or not angle["calibration_id"] or angle["angle_deg"] is None:
+        camera_estimate = bool(angle and angle["source"] == "camera" and angle.get("detected") and angle.get("method") == "yolo_angle_class_estimate")
+        if not angle or not angle["fresh"] or (not camera_estimate and (not angle["calibrated"] or not angle["calibration_id"] or angle["angle_deg"] is None)):
             raise AssessmentError("Record a fresh calibrated angle during this injection before confirming completion.")
         self.state[f"{stage}_angle"] = deepcopy(angle)
         self.state["checklist"][f"{stage}_angle"] = angle["within_target"]
-        self._log(f"Confirmed {stage} injection: smoothed {angle['angle_deg']} degrees, latest raw {angle['raw_angle_deg']} degrees; target {'met' if angle['within_target'] else 'not met'} (prototype rule).")
+        self._log(f"Confirmed {stage} injection: {angle.get('label') if camera_estimate else str(angle['angle_deg']) + ' degrees'}; target {'met' if angle['within_target'] else 'not met'} (prototype rule; {'camera class estimate' if camera_estimate else 'sensor reading'}).")
         self.state["injection_stage_id"] = None
         if stage == "initial":
             self.state["injection_angle"] = deepcopy(angle)
@@ -177,6 +192,7 @@ class AssessmentService:
 
     def _snapshot(self, include_report=True):
         result = deepcopy(self.state)
+        result["angle_source"] = self.state.get("angle_source", "hardware")
         result.update({"intervention_policy": self._intervention_policy(), "injection_stage": "initial" if self.state["phase"] == "injection" else "intervention" if self.state["phase"] == "intervention_injection" else None, "instance_id": self.instance_id, "revision": self.revision, "elapsed": round(max(0, self.clock()-self._started), 3) if self._started is not None else 0, "scenario_elapsed": round(max(0, self.clock()-self._scenario_started), 3) if self._scenario_started is not None else None, "vitals": self._vitals(), "hardware": self._hardware_state(self.state["input_source"]), "angle": self._angle_state(), "score": self._score(), "catalog": {"scenarios": self.config["scenarios"], "drugs": [{"uid": uid, **drug} for uid, drug in self.config["rfid_registry"].items()], "angle_min_deg": self.config["angle_min_deg"], "angle_max_deg": self.config["angle_max_deg"]}})
         result["catalog"]["baseline_vital_ranges"] = deepcopy(self.config["baseline_vital_ranges"])
         if include_report:
@@ -190,7 +206,17 @@ class AssessmentService:
     def command(self, data):
         with self.lock:
             action = data["action"]
-            if action == "set_input_source":
+            if action == "set_angle_source":
+                if self.state["phase"] not in ("mode_selection", "preparation"):
+                    raise AssessmentError("Change the angle source before starting the exercise.")
+                if data.get("session_id") != self.state["session_id"]:
+                    raise AssessmentError("This command belongs to an expired or missing assessment session.")
+                if data.get("angle_source") not in ("hardware", "camera"):
+                    raise AssessmentError("Choose hardware or camera for the angle input.")
+                self.state["angle_source"] = data["angle_source"]
+                self._angles.reset()
+                self._log(f"Selected angle source: {data['angle_source']}.")
+            elif action == "set_input_source":
                 if self.state["phase"] not in ("mode_selection", "preparation"):
                     raise AssessmentError("Change the hardware input source before starting the exercise.")
                 if data.get("session_id") != self.state["session_id"]:
@@ -255,7 +281,9 @@ class AssessmentService:
                     self._log("Assessment ended; prepared a different patient for the next student.")
                     self._save()
                     self.last_report = self._snapshot(False)
+                    angle_source = self.state.get("angle_source", "hardware")
                     self.state = self._new_state(self.state["student"]+1, self.state["patient_id"], self.state["input_source"])
+                    self.state["angle_source"] = angle_source
                     self._started = self._injection_started = self._scenario_started = self._intervention_started = None
                     self._last_reads = {}
                     self._hardware["simulation"].update({"esp32_connected": True, "mpu_connected": True, "rfid_connected": True, "error": None})
@@ -287,6 +315,8 @@ class AssessmentService:
                 self._angles.reset()
             self._log("Simulated sensors " + ("reconnected." if connected else "disconnected."))
         elif action == "simulate_angle":
+            if self._angle_source() == "camera":
+                raise AssessmentError("Simulation angle buttons are disabled while camera angle is selected.")
             if data.get("angle_deg") is None:
                 raise AssessmentError("A simulated angle is required.")
             for _ in range(5):
@@ -312,7 +342,10 @@ class AssessmentService:
 
     def _record_angle(self, data, source):
         self._angles.ingest(data, source, self.state["injection_stage_id"])
-        sample = self._angle_state() if source == self.state["input_source"] else None
+        self._record_current_angle(source)
+
+    def _record_current_angle(self, source):
+        sample = self._angle_state() if source == self._angle_source() else None
         stage = "initial" if self.state["phase"] == "injection" else "intervention" if self.state["phase"] == "intervention_injection" else None
         if sample and stage:
             record = self.state["angle_records"][stage]

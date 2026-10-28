@@ -4,6 +4,7 @@ import { assessmentChecklist, modeNames, scenarioName, formatSeconds } from '../
 import { formatDuration } from './SimulationControls';
 
 function angleSummary(sample) {
+  if (sample?.method === 'yolo_angle_class_estimate') return `${sample.label} · camera estimate · ${sample.within_target ? 'target met' : 'outside target'}`;
   return sample ? `${Number(sample.angle_deg).toFixed(1)}° smoothed / ${Number(sample.raw_angle_deg ?? sample.angle_deg).toFixed(1)}° raw · ${sample.within_target ? 'target met' : 'outside target'}` : 'Not recorded';
 }
 

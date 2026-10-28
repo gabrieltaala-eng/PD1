@@ -4,6 +4,7 @@ import { useCamera } from './hooks/useCamera';
 import { useAssessment } from './hooks/useAssessment';
 import { useMonitorSound } from './hooks/useMonitorSound';
 import { useMediaQuery } from './hooks/useMediaQuery';
+import { useCameraAngle } from './hooks/useCameraAngle.js';
 import { useTracking } from './hooks/useTracking.js';
 import { patients } from './data/patients';
 import { getVitalsState } from './lib/vitals';
@@ -68,6 +69,7 @@ export default function App() {
   trackingContext.current = { mode: trackingMode, cameraKey: trackingCameraKey };
   const tracking = useTracking({ videoRef: video, mode: trackingMode,
     enabled: cameraOn && overlays && !regionFrame && !capturingRegion, cameraKey: trackingCameraKey });
+  const cameraAngle = useCameraAngle({ videoRef: video, state, enabled: cameraOn && assessment.connected, cameraKey: trackingCameraKey });
   const alignmentKey = `${trackingMode}:${breed.id}`;
   const trackingAlignment = trackingAlignments[alignmentKey] || defaultTrackingAlignment(trackingMode);
   const targetProjection = tracking.fresh ? projectTracking(tracking.result, viewport, placement, trackingAlignment) : null;
@@ -153,15 +155,15 @@ export default function App() {
     <SimulationControls state={state} patient={patient} busy={assessment.busy} connected={assessment.connected && cameraOn} onAction={act} onNavigate={openPanel}/>
     {state?.scenario_id && <section className="active-scenario-banner" aria-label="Visible complication"><span><b>{scenarioName(state)}</b><small>{phaseNames[state.phase]} · SIMULATED</small></span><span>HR {monitorActive ? values.hr : '—'} · MAP {monitorActive ? values.map : '—'} · RR {monitorActive ? values.rr : '—'} · EtCO₂ {monitorActive ? values.etco2 : '—'}</span><span>{state.first_response_seconds == null ? state.scenario_elapsed == null ? 'Preparing response timer' : `Response timer ${formatSeconds(state.scenario_elapsed)}` : `First response ${formatSeconds(state.first_response_seconds)}`}</span></section>}
     <div className={`workspace-layout ${menu ? 'mode-layout' : ''} ${showPanel && overlays ? 'has-side-panel' : ''}`}>
-    {menu && <ModeSelection state={state} connected={assessment.connected} busy={assessment.busy} onSelect={mode => act('select_mode', { mode })} onInputSourceChange={input_source => act('set_input_source', { input_source })} onRetry={assessment.retryConnection} withPanel={Boolean(showPanel && overlays)}/>}
+    {menu && <ModeSelection state={state} connected={assessment.connected} busy={assessment.busy} onSelect={mode => act('select_mode', { mode })} onInputSourceChange={input_source => act('set_input_source', { input_source })} onAngleSourceChange={angle_source => act('set_angle_source', { angle_source })} onRetry={assessment.retryConnection} withPanel={Boolean(showPanel && overlays)}/>}
     {overlays && <>
       {showPanel && <section className="panel" id={`workspace-panel-${panel}`} aria-labelledby={`workspace-heading-${panel}`}><div className="panel-header"><h2 id={`workspace-heading-${panel}`} tabIndex={-1}>{tabs.find(t => t[0] === panel)?.[2]}</h2><button className="icon-button" aria-label="Collapse panel" onClick={() => setPanel('')}><X size={18}/></button></div>
         {menu && <button className="secondary mode-return" onClick={() => setPanel('')}>Choose mode</button>}
         {panel === 'patient' && (menu ? <p className="notice">Choose a mode to view the patient.</p> : <><div className="patient-heading"><span className="patient-avatar large"><PawPrint size={30}/></span><div><h3>Meet {patient.Name}</h3><p>Your fictional training patient</p></div></div><dl className="detail-list">{Object.entries(patient).filter(([key]) => !['id', 'breedId', 'Condition'].includes(key)).map(([name,value]) => <div key={name}><dt>{name}</dt><dd>{value}</dd></div>)}</dl><button className="secondary full-width" disabled={disabled || state.checklist.patient || state.phase === 'evaluated'} onClick={() => act('review')}>{state.checklist.patient ? 'Patient review recorded' : 'Confirm patient reviewed'}</button></>)}
         {panel === 'vitals' && <MonitorPanel state={state} values={values} active={monitorActive} sound={sound} pauseReason={pauseReason} onControls={() => openPanel('hardware')}/>}
-        {panel === 'scenario' && <><InjectionAngle state={state}/><ScenarioPanel state={state} command={act} disabled={disabled}/></>}
+        {panel === 'scenario' && <>{state?.angle_source === 'camera' && <div className="notice" role="status">{cameraAngle.status}<button className="secondary" onClick={cameraAngle.retry}>Retry camera angle</button></div>}<InjectionAngle state={state}/><ScenarioPanel state={state} command={act} disabled={disabled}/></>}
         {panel === 'assessment' && <AssessmentPanel key={state?.session_id || `menu-${state?.student}`} state={state} command={act} disabled={disabled}/>}
-        {panel === 'hardware' && <><HardwarePanel state={state} command={act} disabled={disabled} disabledReason={assessment.busy ? 'Wait for the current action to finish.' : pauseReason}/><h3 className="settings-subtitle">Monitor activation</h3><VitalsControls {...wireControls}/></>}
+        {panel === 'hardware' && <><HardwarePanel cameraAngle={cameraAngle} state={state} command={act} disabled={disabled} disabledReason={assessment.busy ? 'Wait for the current action to finish.' : pauseReason}/><h3 className="settings-subtitle">Monitor activation</h3><VitalsControls {...wireControls}/></>}
         {panel === 'settings' && <>
           <TrackingSettings mode={trackingMode} onModeChange={value => { tracking.clearSelection(); setTrackingMode(normalizeTrackingMode(value)); }} tracking={tracking}
             alignment={trackingAlignment} setAlignment={setTrackingAlignment} onSelectRegion={selectPadRegion} selecting={capturingRegion}/>

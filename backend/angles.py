@@ -40,6 +40,19 @@ class AnglePipeline:
         self.latest = {}
         self.filters = {}
 
+    def ingest_camera(self, prediction, stage_id):
+        self.latest["camera"] = {
+            "source": "camera", "injection_stage_id": stage_id,
+            "method": "yolo_angle_class_estimate", "estimated": True,
+            "calibrated": False, "calibration_id": None,
+            "angle_deg": prediction.get("angle_deg"), "raw_angle_deg": prediction.get("angle_deg"),
+            "label": prediction.get("label"), "confidence": prediction.get("confidence"),
+            "model_id": prediction.get("model_id"), "lower_deg": prediction.get("lower_deg"),
+            "upper_deg": prediction.get("upper_deg"), "detected": prediction.get("detected", False),
+            "error": None if prediction.get("detected") else prediction.get("detail", "Syringe not detected."),
+            "monotonic": self.clock(),
+        }
+
     def ingest(self, data, source, stage_id):
         raw = data.get("angle_deg")
         calibrated = bool(data.get("calibrated") and (data.get("calibration_id") or "").strip())
@@ -81,5 +94,10 @@ class AnglePipeline:
         result = {key: value for key, value in sample.items() if key != "monotonic"}
         age = max(0, self.clock()-sample["monotonic"])
         result.update({"age_seconds": round(age, 3), "fresh": connected and age < self.config["hardware_timeout_seconds"]})
+        if source == "camera":
+            result["fresh"] = result["fresh"] and sample["detected"] and age < 1.5
+            result["within_target"] = bool(sample["detected"] and
+                self.config["angle_min_deg"] <= sample["lower_deg"] <= sample["upper_deg"] <= self.config["angle_max_deg"])
+            return result
         result["within_target"] = bool(sample["calibrated"] and sample["angle_deg"] is not None and all(self.config["angle_min_deg"] <= sample[key] <= self.config["angle_max_deg"] for key in ("angle_deg", "raw_angle_deg")))
         return result

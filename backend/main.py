@@ -2,6 +2,8 @@
 import asyncio
 import os
 import json
+import time
+from uuid import uuid4
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +15,7 @@ from assessment_models import AssessmentCommand, HardwareEvent, WireSignal
 from assessment_store import AssessmentStore
 from wire import WireMonitor
 from tracking import TrackingConfig, TrackingEngine
+from camera_angle import CameraAngleDetector
 
 wire_monitor = WireMonitor()
 store = AssessmentStore(os.environ.get("ASSESSMENT_DB_PATH", str(Path(__file__).parent / "data/assessments.sqlite3")))
@@ -20,6 +23,8 @@ config_path = os.environ.get("ASSESSMENT_CONFIG_PATH")
 assessment = AssessmentService(store=store, config=json.loads(Path(config_path).read_text()) if config_path else None)
 app = FastAPI(title="Veterinary Anesthesia AR Backend")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"], allow_credentials=False, allow_methods=["GET", "POST"], allow_headers=["*"])
+camera_detector = CameraAngleDetector()
+camera_owner = None
 
 
 @app.exception_handler(RequestValidationError)
@@ -133,3 +138,59 @@ async def tracking_socket(websocket: WebSocket):
         await websocket.close(code=1008)
     except (WebSocketDisconnect, RuntimeError, OSError):
         pass
+
+
+@app.websocket("/api/ws/angle")
+async def camera_angle_socket(websocket: WebSocket):
+    global camera_owner
+    await websocket.accept()
+    owner = str(uuid4())
+    session_id = stage_id = None
+    try:
+        text = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+        if len(text) > 1024:
+            raise ValueError("Camera configuration is too large.")
+        data = json.loads(text)
+        if not isinstance(data, dict) or set(data) != {"session_id", "injection_stage_id"}:
+            raise ValueError("Send the current session_id and injection_stage_id.")
+        session_id, stage_id = data["session_id"], data["injection_stage_id"]
+        assessment.camera_angle({"detected": False, "detail": "Loading camera model."}, session_id, stage_id)
+        camera_owner = owner
+        await asyncio.to_thread(camera_detector.load)
+        await websocket.send_json({"type": "ready"})
+        while camera_owner == owner:
+            jpeg = await websocket.receive_bytes()
+            if camera_owner != owner:
+                break
+            started = time.monotonic()
+            prediction = await asyncio.to_thread(camera_detector.process, jpeg)
+            if camera_owner != owner:
+                break
+            if time.monotonic() - started > 1.5:
+                prediction = {"detected": False, "detail": "Camera inference took too long. Use a faster device or the sensor option."}
+            angle = assessment.camera_angle(prediction, session_id, stage_id)
+            await websocket.send_json({"type": "angle_result", "angle": angle})
+    except (ValueError, AssessmentError, asyncio.TimeoutError) as error:
+        try:
+            await websocket.send_json({"type": "error", "message": str(error)})
+            await websocket.close(code=1008)
+        except (RuntimeError, OSError):
+            pass
+    except (WebSocketDisconnect, RuntimeError, OSError):
+        pass
+    except Exception:
+        # Report an actionable error without exposing server filesystem details.
+        try:
+            await websocket.send_json({"type": "error", "message": "Camera inference failed. Check the backend console and model installation."})
+            await websocket.close(code=1011)
+        except (RuntimeError, OSError):
+            pass
+        import logging
+        logging.exception("Camera angle inference failed")
+    finally:
+        if camera_owner == owner:
+            camera_owner = None
+            try:
+                assessment.camera_angle({"detected": False, "detail": "Camera angle stream disconnected."}, session_id, stage_id)
+            except AssessmentError:
+                pass

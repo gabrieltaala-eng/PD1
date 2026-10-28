@@ -1,0 +1,3 @@
+# Optional: only needed for camera-based syringe angle estimates.
+-r requirements.txt
+ultralytics>=8.4,<9
